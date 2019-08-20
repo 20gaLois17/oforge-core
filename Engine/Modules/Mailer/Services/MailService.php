@@ -13,6 +13,7 @@ use Oforge\Engine\Modules\Core\Exceptions\ServiceNotFoundException;
 use Oforge\Engine\Modules\Core\Forge\ForgeSlimApp;
 use Oforge\Engine\Modules\Core\Helper\ArrayHelper;
 use Oforge\Engine\Modules\Core\Helper\Statics;
+use Oforge\Engine\Modules\Core\Services\ConfigService;
 use Oforge\Engine\Modules\I18n\Helper\I18N;
 use Oforge\Engine\Modules\Media\Twig\MediaExtension;
 use Oforge\Engine\Modules\TemplateEngine\Core\Twig\CustomTwig;
@@ -28,8 +29,52 @@ use Doctrine\ORM\ORMException;
 
 class MailService {
 
+    private $mailer = null;
+// Initialises PHP Mailer instance with configurations specified in backend
     /**
-     * Initialises PHP Mailer instance with specified mailer options and template data.
+     *
+     * MailService constructor.
+     *
+     * @throws ConfigElementNotFoundException
+     * @throws ORMException
+     * @throws ServiceNotFoundException
+     */
+    function __construct() {
+
+        /** @var  ConfigService $configService */
+        $configService = Oforge()->Services()->get("config");
+        $config        = $configService->getGroupConfigs("mail");
+
+        /** @var PHPMailer $mailer */
+        $this->mailer = new PHPMailer($exceptions = null);
+
+        /** We use these configurations by default */
+        $mailer->isSMTP();
+        $mailer->isHTML();
+        $mailer->Encoding   = $mailer::ENCODING_BASE64;
+        $mailer->CharSet    = $mailer::CHARSET_UTF8;
+
+        /** Set configurations from backend mailer settings */
+        // use array helper to set config keys
+        $mailer->Host       = $configService->get("mailer_host");
+        $mailer->Port       = $configService->get("mailer_port");
+        $mailer->Username   = $configService->get("mailer_smtp_username");
+        $mailer->Password   = $configService->get("mailer_smtp_password");
+        $mailer->SMTPAuth   = $configService->get("mailer_smtp_auth");
+        $mailer->SMTPSecure = $configService->get("mailer_smtp_secure");
+        $mailer->setFrom($this->getSenderAddress($options['from']), $configService->get('mailer_from_name'));
+    }
+
+    /**
+     *  Mailer refactorings:
+     * 1. Load configuration in one db call
+     * 2. Remove unnecessary validation code
+     * 3. Use event system + batchSend() + SMTP keepAlive
+     * 4. Move templates / logic to corresponding Plugins
+     */
+
+    /**
+     *  mailer options and template data.
      * Options = [
      * 'to'         => ['user@host.de' => 'user_name', user2@host.de => 'user2_name, ...],
      * 'cc'         => [],
@@ -39,9 +84,8 @@ class MailService {
      * "subject"    => string,
      * "html"       => bool,
      * ]
-     *
      * TemplateData = ['key' = value, ... ]
-
+     *
      * @param array $options
      * @param array $templateData
      *
@@ -54,84 +98,61 @@ class MailService {
      * @throws Twig_Error_Syntax
      */
     public function send(array $options, array $templateData = []) {
-        if ($this->isValid($options)) {
-            try {
+        try {
 
-               /** @var  $configService */
-                $configService = Oforge()->Services()->get("config");
-                $exceptions    = $configService->get("mailer_exceptions");
-
-                /** @var PHPMailer $mail */
-                $mail          = new PHPMailer($exceptions);
-
-                /**  Mailer Settings */
-                $mail->isSMTP();
-                $mail->setFrom($this->getSenderAddress($options['from']),$configService->get('mailer_from_name'));
-                $mail->Host       = $configService->get("mailer_host");
-                $mail->Username   = $configService->get("mailer_smtp_username");
-                $mail->Port       = $configService->get("mailer_port");
-                $mail->SMTPAuth   = $configService->get("mailer_smtp_auth");
-                $mail->Password   = $configService->get("mailer_smtp_password");
-                $mail->SMTPSecure = $configService->get("mailer_smtp_secure");
-                $mail->Encoding   = 'base64';
-                $mail->CharSet    = 'UTF-8';
-
-                /** Add Recipients ({to,cc,bcc}Addresses) */
-                foreach ($options["to"] as $key => $value) {
-                    $mail->addAddress($key, $value);
-                }
-                if (isset($options['cc'])) {
-                    foreach ($options["cc"] as $key => $value) {
-                        $mail->addCC($key, $value);
-                    }
-                }
-                if (isset($options['bcc'])) {
-                    foreach ($options["bcc"] as $key => $value) {
-                        $mail->addBCC($key, $value);
-                    }
-                }
-                if (isset($options['replyTo'])) {
-                    foreach ($options["replyTo"] as $key => $value) {
-                        $mail->addReplyTo($key, $value);
-                    }
-                }
-
-                /** Add Attachments: */
-                if (isset($options['attachment'])) {
-                    foreach ($options["attachment"] as $key => $value) {
-                        $mail->addAttachment($key, $value);
-                    }
-                }
-                /** Generate Base-Url for Media */
-                $conversationLink = 'http://';
-                if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
-                    $conversationLink = 'https://';
-                }
-
-                $conversationLink .= $_SERVER['HTTP_HOST'];
-                $templateData['baseUrl'] = $conversationLink;
-
-                /** Render HTML */
-                $renderedTemplate = $this->renderMail($options,$templateData);
-
-
-                /** Add Content */
-                $mail->isHTML(ArrayHelper::get($options, 'html', true));
-                $mail->Subject = $options["subject"];
-                $mail->Body    = $renderedTemplate;
-
-                $mail->send();
-
-                Oforge()->Logger()->get("mailer")->info("Message has been sent",[$options, $templateData]);
-
-                return true;
-
-            } catch (Exception $e) {
-                Oforge()->Logger()->get("mailer")->error("Message has not been sent", [$mail->ErrorInfo]);
-                return false;
+            /** Add Recipients ({to,cc,bcc}Addresses) */
+            foreach ($options["to"] as $key => $value) {
+                $this->mailer->addAddress($key, $value);
             }
+            if (isset($options['cc'])) {
+                foreach ($options["cc"] as $key => $value) {
+                    $mail->addCC($key, $value);
+                }
+            }
+            if (isset($options['bcc'])) {
+                foreach ($options["bcc"] as $key => $value) {
+                    $mail->addBCC($key, $value);
+                }
+            }
+            if (isset($options['replyTo'])) {
+                foreach ($options["replyTo"] as $key => $value) {
+                    $mail->addReplyTo($key, $value);
+                }
+            }
+
+            /** Add Attachments: */
+            if (isset($options['attachment'])) {
+                foreach ($options["attachment"] as $key => $value) {
+                    $mail->addAttachment($key, $value);
+                }
+            }
+            /** Generate Base-Url for Media */
+            $conversationLink = 'http://';
+            if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+                $conversationLink = 'https://';
+            }
+
+            $conversationLink        .= $_SERVER['HTTP_HOST'];
+            $templateData['baseUrl'] = $conversationLink;
+
+            /** Render HTML */
+            $renderedTemplate = $this->renderMail($options, $templateData);
+
+            /** Add Content */
+            $mail->Subject = $options["subject"];
+            $mail->Body    = $renderedTemplate;
+
+            $mail->send();
+
+            Oforge()->Logger()->get("mailer")->info("Message has been sent", [$options, $templateData]);
+
+            return true;
+
+        } catch (Exception $e) {
+            Oforge()->Logger()->get("mailer")->error("Message has not been sent", [$mail->ErrorInfo]);
+
+            return false;
         }
-        return false;
     }
 
     /**
@@ -141,7 +162,6 @@ class MailService {
      * @throws ConfigOptionKeyNotExistException
      */
     private function isValid(array $options) : bool {
-
         $keys = ["to", "subject", "template"];
         foreach ($keys as $key) {
             if (!array_key_exists($key, $options)) {
@@ -165,6 +185,7 @@ class MailService {
                 }
             }
         }
+
         return true;
     }
 
@@ -182,16 +203,15 @@ class MailService {
      * @throws Twig_Error_Syntax
      */
     public function renderMail(array $options, array $templateData) {
-
         $templateManagementService = Oforge()->Services()->get("template.management");
-        $templateName = $templateManagementService->getActiveTemplate()->getName();
-        $templatePath = Statics::TEMPLATE_DIR . DIRECTORY_SEPARATOR . $templateName . DIRECTORY_SEPARATOR . 'MailTemplates';
+        $templateName              = $templateManagementService->getActiveTemplate()->getName();
+        $templatePath              = Statics::TEMPLATE_DIR . DIRECTORY_SEPARATOR . $templateName . DIRECTORY_SEPARATOR . 'MailTemplates';
 
-        if(!file_exists($templatePath . DIRECTORY_SEPARATOR . $options['template'])) {
+        if (!file_exists($templatePath . DIRECTORY_SEPARATOR . $options['template'])) {
             $templatePath = Statics::TEMPLATE_DIR . DIRECTORY_SEPARATOR . Statics::DEFAULT_THEME . DIRECTORY_SEPARATOR . 'MailTemplates';
         }
 
-        $twig = new CustomTwig($templatePath, ['cache' =>  ROOT_PATH . DIRECTORY_SEPARATOR . Statics::CACHE_DIR . '/mailer']);
+        $twig = new CustomTwig($templatePath, ['cache' => ROOT_PATH . DIRECTORY_SEPARATOR . Statics::CACHE_DIR . '/mailer']);
         $twig->addExtension(new \Oforge\Engine\Modules\CMS\Twig\AccessExtension());
         $twig->addExtension(new AccessExtension());
         $twig->addExtension(new MediaExtension());
@@ -199,7 +219,7 @@ class MailService {
         $twig->addExtension(new TwigOforgeDebugExtension());
 
         /** @var string $html */
-        $html =  $twig->fetch($template = $options['template'], $data = $templateData);
+        $html = $twig->fetch($template = $options['template'], $data = $templateData);
 
         /** @var  $inlineCssService */
         $inlineCssService = Oforge()->Services()->get('inline.css');
@@ -217,16 +237,16 @@ class MailService {
      * @throws ServiceNotFoundException
      */
     public function getSenderAddress($key = 'info') {
-
         $configService = Oforge()->Services()->get("config");
 
-        $host          = $configService->get('mailer_from_host');
-        if(!$host) {
+        $host = $configService->get('mailer_from_host');
+        if (!$host) {
             throw new InvalidArgumentException("Error: Host is not set");
         }
-        $sender        = $configService->get('mailer_from_' . $key);
+        $sender = $configService->get('mailer_from_' . $key);
 
         $senderAddress = $sender . '@' . $host;
+
         return $senderAddress;
     }
 
@@ -244,25 +264,25 @@ class MailService {
      * @throws Twig_Error_Syntax
      */
     public function sendNewMessageInfoMail($userId, $conversationId) {
-
         /** @var  UserService $userService */
-        $userService   = Oforge()->Services()->get('frontend.user.management.user');
+        $userService = Oforge()->Services()->get('frontend.user.management.user');
 
         /** @var User $user */
-        $user          = $userService->getUserById($userId);
+        $user = $userService->getUserById($userId);
 
-        $userMail = $user->getEmail();
+        $userMail      = $user->getEmail();
         $mailerOptions = [
             'to'       => [$userMail => $userMail],
             'from'     => 'no_reply',
             'subject'  => I18N::translate('mailer_subject_new_message'),
             'template' => 'NewMessage.twig',
         ];
-        $templateData = [
-            'conversationId'   => $conversationId,
-            'receiver_name'    => $user->getDetail()->getNickName(),
-            'sender_mail'      => $this->getSenderAddress('no_reply'),
+        $templateData  = [
+            'conversationId' => $conversationId,
+            'receiver_name'  => $user->getDetail()->getNickName(),
+            'sender_mail'    => $this->getSenderAddress('no_reply'),
         ];
+
         return $this->send($mailerOptions, $templateData);
     }
 
@@ -279,7 +299,6 @@ class MailService {
      * @throws Twig_Error_Syntax
      */
     public function sendInsertionApprovedInfoMail($insertionId) {
-
         /** @var InsertionService $insertionService */
         $insertionService = Oforge()->Services()->get('insertion');
 
@@ -287,8 +306,8 @@ class MailService {
         $insertion = $insertionService->getInsertionById($insertionId);
 
         /** @var User $user */
-        $user          = $insertion->getUser();
-        $userMail      = $user->getEmail();
+        $user     = $insertion->getUser();
+        $userMail = $user->getEmail();
 
         $mailerOptions = [
             'to'       => [$userMail => $userMail],
@@ -296,12 +315,13 @@ class MailService {
             'subject'  => I18N::translate('mailer_subject_insertion_approved'),
             'template' => 'InsertionApproved.twig',
         ];
-        $templateData = [
-            'insertionId'      => $insertionId,
+        $templateData  = [
+            'insertionId'   => $insertionId,
             // TODO: add title 'insertionTitle'   => $insertion->getContent(),
-            'receiver_name'    => $user->getDetail()->getNickName(),
-            'sender_mail'      => $this->getSenderAddress('no_reply'),
+            'receiver_name' => $user->getDetail()->getNickName(),
+            'sender_mail'   => $this->getSenderAddress('no_reply'),
         ];
+
         return $this->send($mailerOptions, $templateData);
     }
 
@@ -321,11 +341,11 @@ class MailService {
      */
     public function sendNewSearchResultsInfoMail($userId, $newResultsCount, $searchLink) {
         /** @var  UserService $userService */
-        $userService   = Oforge()->Services()->get('frontend.user.management.user');
+        $userService = Oforge()->Services()->get('frontend.user.management.user');
 
         /** @var User $user */
-        $user          = $userService->getUserById($userId);
-        $userMail      = $user->getEmail();
+        $user     = $userService->getUserById($userId);
+        $userMail = $user->getEmail();
 
         $mailerOptions = [
             'to'       => [$userMail => $userMail],
@@ -333,13 +353,14 @@ class MailService {
             'subject'  => I18N::translate('mailer_subject_new_search_results'),
             'template' => 'NewSearchResults.twig',
         ];
-        $templateData = [
-            'resultCount' => $newResultsCount,
-            'searchLink'  => $searchLink,
-            'sender_mail' => $this->getSenderAddress('no_reply'),
+        $templateData  = [
+            'resultCount'   => $newResultsCount,
+            'searchLink'    => $searchLink,
+            'sender_mail'   => $this->getSenderAddress('no_reply'),
             'receiver_name' => $user->getDetail()->getNickName(),
 
         ];
+
         return $this->send($mailerOptions, $templateData);
     }
 
@@ -359,7 +380,7 @@ class MailService {
         $mailerOptions = [
             'to'       => [$userMail => $userMail],
             'from'     => 'no_reply',
-            'subject'  => I18N::translate('mailer_subject_insertion_created','Insertion was created'),
+            'subject'  => I18N::translate('mailer_subject_insertion_created', 'Insertion was created'),
             'template' => 'InsertionCreated.twig',
         ];
         $templateData  = [
