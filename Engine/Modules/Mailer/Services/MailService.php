@@ -31,14 +31,7 @@ class MailService {
 
     private $mailer = null;
 // Initialises PHP Mailer instance with configurations specified in backend
-    /**
-     *
-     * MailService constructor.
-     *
-     * @throws ConfigElementNotFoundException
-     * @throws ORMException
-     * @throws ServiceNotFoundException
-     */
+
     function __construct() {
 
         /** @var  ConfigService $configService */
@@ -63,6 +56,21 @@ class MailService {
         $mailer->SMTPAuth   = $configService->get("mailer_smtp_auth");
         $mailer->SMTPSecure = $configService->get("mailer_smtp_secure");
         $mailer->setFrom($this->getSenderAddress($options['from']), $configService->get('mailer_from_name'));
+    }
+
+    public function send() {
+        try {
+            $this->mailer->send();
+
+            Oforge()->Logger()->get("mailer")->info("Message has been sent", [$options, $templateData]);
+
+            return true;
+
+        } catch(\Exception $e) {
+            Oforge()->Logger()->get("mailer")->error("Message has not been sent", [$mail->ErrorInfo]);
+
+            return false;
+        }
     }
 
     /**
@@ -144,14 +152,9 @@ class MailService {
 
             $mail->send();
 
-            Oforge()->Logger()->get("mailer")->info("Message has been sent", [$options, $templateData]);
-
-            return true;
 
         } catch (Exception $e) {
-            Oforge()->Logger()->get("mailer")->error("Message has not been sent", [$mail->ErrorInfo]);
 
-            return false;
         }
     }
 
