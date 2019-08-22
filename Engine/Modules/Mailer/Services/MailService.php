@@ -30,13 +30,20 @@ use Doctrine\ORM\ORMException;
 class MailService {
 
     private $mailer = null;
-// Initialises PHP Mailer instance with configurations specified in backend
+    private $configService = null;
 
+    /**
+     * MailService constructor. Initialises PHP Mailer instance with configurations specified in backend
+     *
+     * @throws ConfigElementNotFoundException
+     * @throws ORMException
+     * @throws ServiceNotFoundException
+     */
     function __construct() {
 
         /** @var  ConfigService $configService */
-        $configService = Oforge()->Services()->get("config");
-        $config        = $configService->getGroupConfigs("mail");
+        $this->configService = Oforge()->Services()->get("config");
+        $config              = $this->configService->getGroupConfigs("mail");
 
         /** @var PHPMailer $mailer */
         $this->mailer = new PHPMailer($exceptions = null);
@@ -49,40 +56,16 @@ class MailService {
 
         /** Set configurations from backend mailer settings */
         // use array helper to set config keys
-        $mailer->Host       = $configService->get("mailer_host");
-        $mailer->Port       = $configService->get("mailer_port");
-        $mailer->Username   = $configService->get("mailer_smtp_username");
-        $mailer->Password   = $configService->get("mailer_smtp_password");
-        $mailer->SMTPAuth   = $configService->get("mailer_smtp_auth");
-        $mailer->SMTPSecure = $configService->get("mailer_smtp_secure");
-        $mailer->setFrom($this->getSenderAddress($options['from']), $configService->get('mailer_from_name'));
-    }
+        $mailer->Host       = $this->configService->get("mailer_host");
+        $mailer->Port       = $this->configService->get("mailer_port");
+        $mailer->Username   = $this->configService->get("mailer_smtp_username");
+        $mailer->Password   = $this->configService->get("mailer_smtp_password");
+        $mailer->SMTPAuth   = $this->configService->get("mailer_smtp_auth");
+        $mailer->SMTPSecure = $this->configService->get("mailer_smtp_secure");
 
-    public function send() {
-        try {
-            $this->mailer->send();
-
-            Oforge()->Logger()->get("mailer")->info("Message has been sent", [$options, $templateData]);
-
-            return true;
-
-        } catch(\Exception $e) {
-            Oforge()->Logger()->get("mailer")->error("Message has not been sent", [$mail->ErrorInfo]);
-
-            return false;
-        }
     }
 
     /**
-     *  Mailer refactorings:
-     * 1. Load configuration in one db call
-     * 2. Remove unnecessary validation code
-     * 3. Use event system + batchSend() + SMTP keepAlive
-     * 4. Move templates / logic to corresponding Plugins
-     */
-
-    /**
-     *  mailer options and template data.
      * Options = [
      * 'to'         => ['user@host.de' => 'user_name', user2@host.de => 'user2_name, ...],
      * 'cc'         => [],
@@ -93,45 +76,43 @@ class MailService {
      * "html"       => bool,
      * ]
      * TemplateData = ['key' = value, ... ]
-     *
      * @param array $options
      * @param array $templateData
      *
      * @return bool
      * @throws ConfigElementNotFoundException
-     * @throws ConfigOptionKeyNotExistException
+     * @throws Exception
      * @throws ServiceNotFoundException
-     * @throws Twig_Error_Loader
-     * @throws Twig_Error_Runtime
-     * @throws Twig_Error_Syntax
      */
     public function send(array $options, array $templateData = []) {
-        try {
 
+        $this->mailer->setFrom($this->getSenderAddress($options['from']), $this->configService->get('mailer_from_name'));
+
+        try {
             /** Add Recipients ({to,cc,bcc}Addresses) */
             foreach ($options["to"] as $key => $value) {
                 $this->mailer->addAddress($key, $value);
             }
             if (isset($options['cc'])) {
                 foreach ($options["cc"] as $key => $value) {
-                    $mail->addCC($key, $value);
+                    $this->mailer->addCC($key, $value);
                 }
             }
             if (isset($options['bcc'])) {
                 foreach ($options["bcc"] as $key => $value) {
-                    $mail->addBCC($key, $value);
+                    $this->mailer->addBCC($key, $value);
                 }
             }
             if (isset($options['replyTo'])) {
                 foreach ($options["replyTo"] as $key => $value) {
-                    $mail->addReplyTo($key, $value);
+                    $this->mailer->addReplyTo($key, $value);
                 }
             }
 
             /** Add Attachments: */
             if (isset($options['attachment'])) {
                 foreach ($options["attachment"] as $key => $value) {
-                    $mail->addAttachment($key, $value);
+                    $this->mailer->addAttachment($key, $value);
                 }
             }
             /** Generate Base-Url for Media */
@@ -147,50 +128,33 @@ class MailService {
             $renderedTemplate = $this->renderMail($options, $templateData);
 
             /** Add Content */
-            $mail->Subject = $options["subject"];
-            $mail->Body    = $renderedTemplate;
+            $this->mailer->Subject = $options["subject"];
+            $this->mailer->Body    = $renderedTemplate;
 
-            $mail->send();
+            $this->mailer->send();
 
+            Oforge()->Logger()->get("mailer")->info("Message has been sent", [$options, $templateData]);
 
-        } catch (Exception $e) {
+            return true;
 
+        } catch(\Exception $e) {
+            Oforge()->Logger()->get("mailer")->error("Message has not been sent", [$this->mailer->ErrorInfo]);
+
+            return false;
         }
     }
 
     /**
-     * @param array $options
-     *
-     * @return bool
-     * @throws ConfigOptionKeyNotExistException
+     *  Mailer refactorings:
+     * 1. Load configuration in one db call
+     * 2. Remove unnecessary validation code
+     * 3. Use event system + batchSend() + SMTP keepAlive
+     * 4. Move templates / logic to corresponding Plugins
      */
-    private function isValid(array $options) : bool {
-        $keys = ["to", "subject", "template"];
-        foreach ($keys as $key) {
-            if (!array_key_exists($key, $options)) {
-                throw new ConfigOptionKeyNotExistException($key);
-            }
-        }
 
-        /** Validate Mail Addresses */
-        $emailKeys = ["to", "cc", "bcc", "replyTo"];
-        foreach ($emailKeys as $key) {
-            if (array_key_exists($key, $options)) {
-                if (is_array($options[$key])) {
-                    foreach ($options[$key] as $email => $name) {
-                        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-                            throw new InvalidArgumentException("$email is not a valid email.");
-                        }
-                    }
-                } else {
-                    // Argument is not an Array
-                    throw new InvalidArgumentException("Expected array for $key but get " . gettype($options[$key]));
-                }
-            }
-        }
 
-        return true;
-    }
+
+
 
     /**
      * Loads minimal twig environment and returns rendered HTML-template with inlined CSS from active theme.
