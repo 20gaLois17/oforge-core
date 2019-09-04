@@ -16,6 +16,7 @@ use Oforge\Engine\Modules\Core\Helper\Statics;
 use Oforge\Engine\Modules\Core\Services\ConfigService;
 use Oforge\Engine\Modules\I18n\Helper\I18N;
 use Oforge\Engine\Modules\Media\Twig\MediaExtension;
+use Oforge\Engine\Modules\TemplateEngine\Core\Services\TemplateManagementService;
 use Oforge\Engine\Modules\TemplateEngine\Core\Twig\CustomTwig;
 use Oforge\Engine\Modules\TemplateEngine\Core\Twig\TwigOforgeDebugExtension;
 use Oforge\Engine\Modules\TemplateEngine\Extensions\Twig\AccessExtension;
@@ -29,15 +30,19 @@ use Doctrine\ORM\ORMException;
 
 class MailService {
 
-    private $mailer = null;
+    private $mailer        = null;
     private $configService = null;
+    private $twig          = null;
 
     /**
-     * MailService constructor. Initialises PHP Mailer instance with configurations specified in backend
+     * MailService constructor. Initialises PHP Mailer instance with configuration and dependencies
      *
      * @throws ConfigElementNotFoundException
      * @throws ORMException
      * @throws ServiceNotFoundException
+     * @throws Twig_Error_Loader
+     * @throws \Doctrine\ORM\OptimisticLockException
+     * @throws \Oforge\Engine\Modules\Core\Exceptions\Template\TemplateNotFoundException
      */
     function __construct() {
 
@@ -48,20 +53,34 @@ class MailService {
         /** @var PHPMailer $mailer */
         $this->mailer = new PHPMailer($exceptions = null);
 
-        /** We use these configurations by default */
-        $mailer->isSMTP();
-        $mailer->isHTML();
-        $mailer->Encoding   = $mailer::ENCODING_BASE64;
-        $mailer->CharSet    = $mailer::CHARSET_UTF8;
+        /** Default configuration */
+        $this->mailer->isSMTP();
+        $this->mailer->isHTML();
+        $this->mailer->Encoding   = $this->mailer::ENCODING_BASE64;
+        $this->mailer->CharSet    = $this->mailer::CHARSET_UTF8;
 
-        /** Set configurations from backend mailer settings */
-        // use array helper to set config keys
-        $mailer->Host       = $this->configService->get("mailer_host");
-        $mailer->Port       = $this->configService->get("mailer_port");
-        $mailer->Username   = $this->configService->get("mailer_smtp_username");
-        $mailer->Password   = $this->configService->get("mailer_smtp_password");
-        $mailer->SMTPAuth   = $this->configService->get("mailer_smtp_auth");
-        $mailer->SMTPSecure = $this->configService->get("mailer_smtp_secure");
+        /** Backend configuration */
+        // TODO: use array helper to set config keys ?? don't use config service for this!!
+        $this->mailer->Host        = $this->configService->get("mailer_host");
+        $this->mailer->Port        = $this->configService->get("mailer_port");
+        $this->mailer->Username    = $this->configService->get("mailer_smtp_username");
+        $this->mailer->Password    = $this->configService->get("mailer_smtp_password");
+        $this->mailer->SMTPAuth    = $this->configService->get("mailer_smtp_auth");
+        $this->mailer->SMTPSecure  = $this->configService->get("mailer_smtp_secure");
+
+        /** @var TemplateManagementService $templateManagementService */
+        $templateManagementService = Oforge()->Services()->get("template.management");
+        $activeTemplate            = $templateManagementService->getActiveTemplate()->getName();
+
+        $templatePath              = Statics::TEMPLATE_DIR . DIRECTORY_SEPARATOR . $activeTemplate . DIRECTORY_SEPARATOR . 'MailTemplates';
+
+        /** @var CustomTwig twig */
+        $this->twig                = new CustomTwig($templatePath, ['cache' => ROOT_PATH . DIRECTORY_SEPARATOR . Statics::CACHE_DIR . '/mailer']);
+        $this->twig->addExtension(new \Oforge\Engine\Modules\CMS\Twig\AccessExtension());
+        $this->twig->addExtension(new AccessExtension());
+        $this->twig->addExtension(new MediaExtension());
+        $this->twig->addExtension(new SlimExtension());
+        $this->twig->addExtension(new TwigOforgeDebugExtension());
 
     }
 
@@ -133,12 +152,12 @@ class MailService {
 
             $this->mailer->send();
 
-            Oforge()->Logger()->get("mailer")->info("Message has been sent", [$options, $templateData]);
+            Oforge()->Logger()->get("mailer")->info("Mail has been sent", [$options, $templateData]);
 
             return true;
 
         } catch(\Exception $e) {
-            Oforge()->Logger()->get("mailer")->error("Message has not been sent", [$this->mailer->ErrorInfo]);
+            Oforge()->Logger()->get("mailer")->error("Mail has not been sent", [$this->mailer->ErrorInfo]);
 
             return false;
         }
@@ -149,41 +168,26 @@ class MailService {
      * 1. Load configuration in one db call
      * 2. Remove unnecessary validation code
      * 3. Use event system + batchSend() + SMTP keepAlive
-     * 4. Move templates / logic to corresponding Plugins
+     * 4. Move templates / logic to corresponding  --> later
      */
 
 
-
-
-
     /**
-     * Loads minimal twig environment and returns rendered HTML-template with inlined CSS from active theme.
-     * If specified template does not exists in active theme -> fallback to base theme
+     * Checks if the specified template exists in active Theme, if not: Fallback to Base Theme
+     *
      *
      * @param array $options
      * @param array $templateData
      *
-     * @return string
+     * @return string HTML with inline CSS for mail sending
      * @throws ServiceNotFoundException
-     * @throws Twig_Error_Loader
-     * @throws Twig_Error_Runtime
-     * @throws Twig_Error_Syntax
      */
     public function renderMail(array $options, array $templateData) {
-        $templateManagementService = Oforge()->Services()->get("template.management");
-        $templateName              = $templateManagementService->getActiveTemplate()->getName();
-        $templatePath              = Statics::TEMPLATE_DIR . DIRECTORY_SEPARATOR . $templateName . DIRECTORY_SEPARATOR . 'MailTemplates';
 
+        // check with twig loader
         if (!file_exists($templatePath . DIRECTORY_SEPARATOR . $options['template'])) {
             $templatePath = Statics::TEMPLATE_DIR . DIRECTORY_SEPARATOR . Statics::DEFAULT_THEME . DIRECTORY_SEPARATOR . 'MailTemplates';
         }
-
-        $twig = new CustomTwig($templatePath, ['cache' => ROOT_PATH . DIRECTORY_SEPARATOR . Statics::CACHE_DIR . '/mailer']);
-        $twig->addExtension(new \Oforge\Engine\Modules\CMS\Twig\AccessExtension());
-        $twig->addExtension(new AccessExtension());
-        $twig->addExtension(new MediaExtension());
-        $twig->addExtension(new SlimExtension());
-        $twig->addExtension(new TwigOforgeDebugExtension());
 
         /** @var string $html */
         $html = $twig->fetch($template = $options['template'], $data = $templateData);
@@ -223,13 +227,11 @@ class MailService {
      *
      * @return bool
      * @throws ConfigElementNotFoundException
-     * @throws ConfigOptionKeyNotExistException
+     * @throws Exception
      * @throws ORMException
      * @throws ServiceNotFoundException
-     * @throws Twig_Error_Loader
-     * @throws Twig_Error_Runtime
-     * @throws Twig_Error_Syntax
      */
+    //TODO: do this in corresponding plugin
     public function sendNewMessageInfoMail($userId, $conversationId) {
         /** @var  UserService $userService */
         $userService = Oforge()->Services()->get('frontend.user.management.user');
@@ -251,6 +253,7 @@ class MailService {
         ];
 
         return $this->send($mailerOptions, $templateData);
+
     }
 
     /**
@@ -258,13 +261,11 @@ class MailService {
      *
      * @return bool
      * @throws ConfigElementNotFoundException
-     * @throws ConfigOptionKeyNotExistException
+     * @throws Exception
      * @throws ORMException
      * @throws ServiceNotFoundException
-     * @throws Twig_Error_Loader
-     * @throws Twig_Error_Runtime
-     * @throws Twig_Error_Syntax
      */
+    //TODO: do this in corresponding plugin
     public function sendInsertionApprovedInfoMail($insertionId) {
         /** @var InsertionService $insertionService */
         $insertionService = Oforge()->Services()->get('insertion');
@@ -299,13 +300,11 @@ class MailService {
      *
      * @return bool
      * @throws ConfigElementNotFoundException
-     * @throws ConfigOptionKeyNotExistException
+     * @throws Exception
      * @throws ORMException
      * @throws ServiceNotFoundException
-     * @throws Twig_Error_Loader
-     * @throws Twig_Error_Runtime
-     * @throws Twig_Error_Syntax
      */
+    //TODO: do this in corresponding plugin
     public function sendNewSearchResultsInfoMail($userId, $newResultsCount, $searchLink) {
         /** @var  UserService $userService */
         $userService = Oforge()->Services()->get('frontend.user.management.user');
@@ -336,12 +335,10 @@ class MailService {
      * @param Insertion $insertion
      *
      * @throws ConfigElementNotFoundException
-     * @throws ConfigOptionKeyNotExistException
+     * @throws Exception
      * @throws ServiceNotFoundException
-     * @throws Twig_Error_Loader
-     * @throws Twig_Error_Runtime
-     * @throws Twig_Error_Syntax
      */
+    //TODO: do this in corresponding plugin
     public function sendInsertionCreateInfoMail(User $user, Insertion $insertion) {
         $userMail      = $user->getEmail();
         $mailerOptions = [
