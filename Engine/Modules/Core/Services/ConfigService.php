@@ -25,7 +25,7 @@ class ConfigService extends AbstractDatabaseAccess {
      * ConfigService constructor.
      */
     public function __construct() {
-        parent::__construct(Config::class);
+        parent::__construct(['default' => Config::class]);
     }
 
     /**
@@ -126,7 +126,7 @@ class ConfigService extends AbstractDatabaseAccess {
      *
      * @param string $groupName
      *
-     * @return Config[]
+     * @return Config
      * @throws ORMException
      */
     public function getGroupConfigs(string $groupName) {
