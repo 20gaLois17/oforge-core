@@ -7,9 +7,9 @@ use FrontendUserManagement\Services\UserService;
 use Insertion\Models\Insertion;
 use Insertion\Services\InsertionService;
 use InvalidArgumentException;
-use Oforge\Engine\Modules\Core\Exceptions\ConfigElementNotFoundException;
 use Oforge\Engine\Modules\Core\Exceptions\ServiceNotFoundException;
 use Oforge\Engine\Modules\Core\Helper\Statics;
+use Oforge\Engine\Modules\Core\Models\Config\Config;
 use Oforge\Engine\Modules\Core\Services\ConfigService;
 use Oforge\Engine\Modules\I18n\Helper\I18N;
 use Oforge\Engine\Modules\Media\Twig\MediaExtension;
@@ -28,11 +28,11 @@ class MailService {
     private $mailer        = null;
     private $configService = null;
     private $twig          = null;
+    private $config        = [];
 
     /**
      * MailService constructor. Initialises PHP Mailer instance with configuration and dependencies
      *
-     * @throws ConfigElementNotFoundException
      * @throws ORMException
      * @throws ServiceNotFoundException
      * @throws Twig_Error_Loader
@@ -40,14 +40,20 @@ class MailService {
      * @throws \Oforge\Engine\Modules\Core\Exceptions\Template\TemplateNotFoundException
      */
     function __construct() {
+        $start = microtime(true);
 
         /** @var  ConfigService $configService */
-        $this->configService = Oforge()->Services()->get("config");
-        // $config              = $this->configService->getGroupConfigs("mail")->toArray(2);
+        $this->configService       = Oforge()->Services()->get("config");
 
+        /** @var Config[] $mailerConfig */
+        $mailerConfig              = $this->configService->getGroupConfigs("mailer");
+
+        foreach ($mailerConfig as $config) {
+            $this->config[$config->getName()] = $config->getValues()[0]->getValue();
+        }
 
         /** @var PHPMailer $mailer */
-        $this->mailer = new PHPMailer($exceptions = null);
+        $this->mailer = new PHPMailer($this->config["mailer_exceptions"]);
 
         /** Default configuration */
         $this->mailer->isSMTP();
@@ -55,16 +61,13 @@ class MailService {
         $this->mailer->Encoding   = $this->mailer::ENCODING_BASE64;
         $this->mailer->CharSet    = $this->mailer::CHARSET_UTF8;
 
-        /** Backend configuration */
-        // TODO: use array helper to set config keys ?? don't use config service for this!!
-
-
-        $this->mailer->Host        = $this->configService->get("mailer_host");
-        $this->mailer->Port        = $this->configService->get("mailer_port");
-        $this->mailer->Username    = $this->configService->get("mailer_smtp_username");
-        $this->mailer->Password    = $this->configService->get("mailer_smtp_password");
-        $this->mailer->SMTPAuth    = $this->configService->get("mailer_smtp_auth");
-        $this->mailer->SMTPSecure  = $this->configService->get("mailer_smtp_secure");
+        /** Backend configurations */
+        $this->mailer->Host        = $this->config["mailer_host"];
+        $this->mailer->Port        = $this->config["mailer_port"];
+        $this->mailer->Username    = $this->config["mailer_smtp_username"];
+        $this->mailer->Password    = $this->config["mailer_smtp_password"];
+        $this->mailer->SMTPAuth    = $this->config["mailer_smtp_auth"];
+        $this->mailer->SMTPSecure  = $this->config["mailer_smtp_secure"];
 
         /** @var TemplateManagementService $templateManagementService */
         $templateManagementService = Oforge()->Services()->get("template.management");
@@ -74,11 +77,15 @@ class MailService {
 
         /** @var CustomTwig twig */
         $this->twig = new CustomTwig($templatePath, ['cache' => ROOT_PATH . DIRECTORY_SEPARATOR . Statics::CACHE_DIR . '/mailer']);
+
         $this->twig->addExtension(new \Oforge\Engine\Modules\CMS\Twig\AccessExtension());
         $this->twig->addExtension(new AccessExtension());
         $this->twig->addExtension(new MediaExtension());
         $this->twig->addExtension(new SlimExtension());
         $this->twig->addExtension(new TwigOforgeDebugExtension());
+
+        $time_elapsed_secs = microtime(true) - $start;
+        print($time_elapsed_secs);
 
     }
 
@@ -97,13 +104,11 @@ class MailService {
      * @param array $templateData
      *
      * @return bool
-     * @throws ConfigElementNotFoundException
      * @throws Exception
-     * @throws ServiceNotFoundException
      */
     public function send(array $options, array $templateData = []) {
 
-        $this->mailer->setFrom($this->getSenderAddress($options['from']), $this->configService->get('mailer_from_name'));
+        $this->mailer->setFrom($address = $this->getSenderAddress($options['from']), $name = $this->config['mailer_from_name']);
 
         try {
             /** Add Recipients ({to,cc,bcc}Addresses) */
@@ -163,13 +168,13 @@ class MailService {
 
     /**
      *  Mailer refactorings:
-     * 1. Load configuration in one db call --> do this now!
-     * 2. Remove unnecessary validation code --> done!
-     * 3. Use event system + batchSend() + SMTP keepAlive
+     * 1. Load configuration in one db call ---- DONE
+     * 2. Remove unnecessary validation code ---- DONE
+     *
+     * 3. Use event system + batchSend() + SMTP keepAlive --> later
      * 4. Move templates / logic to corresponding  --> later
-     * 5. Don't create a new mailer instance on each send
+     * 5. Don't create a new mailer instance on each send ---- DONE
      */
-
 
     /**
      * Checks if the specified template exists in active Theme, if not: Fallback to Base Theme
@@ -200,23 +205,18 @@ class MailService {
     }
 
     /**
-     * Looks up mailer backend options for custom sender and host information.
+     * Looks up mailer backend options for sender and host information.
      *
-     * @param string $key
-     *
-     * @return string
-     * @throws ConfigElementNotFoundException
-     * @throws ServiceNotFoundException
+     * @param  string $key
+     * @return string $senderAddress
      */
     public function getSenderAddress($key = 'info') {
-        $configService = Oforge()->Services()->get("config");
 
-        $host = $configService->get('mailer_from_host');
+        $host = $this->config['mailer_from_host'];
         if (!$host) {
             throw new InvalidArgumentException("Error: Host is not set");
         }
-        $sender = $configService->get('mailer_from_' . $key);
-
+        $sender =$this->config['mailer_from_' . $key];
         $senderAddress = $sender . '@' . $host;
 
         return $senderAddress;
@@ -227,7 +227,6 @@ class MailService {
      * @param $conversationId
      *
      * @return bool
-     * @throws ConfigElementNotFoundException
      * @throws Exception
      * @throws ORMException
      * @throws ServiceNotFoundException
@@ -261,7 +260,6 @@ class MailService {
      * @param $insertionId
      *
      * @return bool
-     * @throws ConfigElementNotFoundException
      * @throws Exception
      * @throws ORMException
      * @throws ServiceNotFoundException
@@ -300,7 +298,6 @@ class MailService {
      * @param $searchLink
      *
      * @return bool
-     * @throws ConfigElementNotFoundException
      * @throws Exception
      * @throws ORMException
      * @throws ServiceNotFoundException
@@ -335,7 +332,6 @@ class MailService {
      * @param User $user
      * @param Insertion $insertion
      *
-     * @throws ConfigElementNotFoundException
      * @throws Exception
      * @throws ServiceNotFoundException
      */
