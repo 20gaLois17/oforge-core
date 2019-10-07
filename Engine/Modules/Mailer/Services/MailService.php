@@ -25,13 +25,17 @@ use Doctrine\ORM\ORMException;
 
 class MailService {
 
-    private $mailer        = null;
-    private $configService = null;
-    private $twig          = null;
-    private $config        = [];
+    private $mailer;
+    private $configService;
+    private $twig;
+    private $backendConfig;
+
+    function __construct() {
+
+    }
 
     /**
-     * MailService constructor. Initialises PHP Mailer instance with configuration and dependencies
+     * Initialises PHP Mailer and Twig instance with configuration and dependencies
      *
      * @throws ORMException
      * @throws ServiceNotFoundException
@@ -39,9 +43,30 @@ class MailService {
      * @throws \Doctrine\ORM\OptimisticLockException
      * @throws \Oforge\Engine\Modules\Core\Exceptions\Template\TemplateNotFoundException
      */
-    function __construct() {
-        $start = microtime(true);
+    private function init() {
 
+        /** @var PHPMailer $mailer */
+        $this->mailer = new PHPMailer($this->config["mailer_exceptions"]);
+
+        /**
+         * Load default configuration
+         */
+        $this->mailer->isSMTP();
+        $this->mailer->isHTML();
+        $this->mailer->Encoding   = $this->mailer::ENCODING_BASE64;
+        $this->mailer->CharSet    = $this->mailer::CHARSET_UTF8;
+
+        // what happens in the module loader??
+        // when will this code be executed?
+        // should install xdebug -> understand how this is forged
+
+        // initConfig() load configuration into mailer instance
+        // initTwig() initialise twig instance with all necessary dependencies
+        // initMailer() initialise php mailer instance
+
+        /**
+         * Load backend configuration
+         */
         /** @var  ConfigService $configService */
         $this->configService       = Oforge()->Services()->get("config");
 
@@ -49,43 +74,60 @@ class MailService {
         $mailerConfig              = $this->configService->getGroupConfigs("mailer");
 
         foreach ($mailerConfig as $config) {
-            $this->config[$config->getName()] = $config->getValues()[0]->getValue();
+            $this->backendConfig[$config->getName()] = $config->getValues()[0]->getValue();
         }
 
-        /** @var PHPMailer $mailer */
-        $this->mailer = new PHPMailer($this->config["mailer_exceptions"]);
+        $this->mailer->Host        = $this->backendConfig["mailer_host"];
+        $this->mailer->Port        = $this->backendConfig["mailer_port"];
+        $this->mailer->Username    = $this->backendConfig["mailer_smtp_username"];
+        $this->mailer->Password    = $this->backendConfig["mailer_smtp_password"];
+        $this->mailer->SMTPAuth    = $this->backendConfig["mailer_smtp_auth"];
+        $this->mailer->SMTPSecure  = $this->backendConfig["mailer_smtp_secure"];
 
-        /** Default configuration */
-        $this->mailer->isSMTP();
-        $this->mailer->isHTML();
-        $this->mailer->Encoding   = $this->mailer::ENCODING_BASE64;
-        $this->mailer->CharSet    = $this->mailer::CHARSET_UTF8;
 
-        /** Backend configurations */
-        $this->mailer->Host        = $this->config["mailer_host"];
-        $this->mailer->Port        = $this->config["mailer_port"];
-        $this->mailer->Username    = $this->config["mailer_smtp_username"];
-        $this->mailer->Password    = $this->config["mailer_smtp_password"];
-        $this->mailer->SMTPAuth    = $this->config["mailer_smtp_auth"];
-        $this->mailer->SMTPSecure  = $this->config["mailer_smtp_secure"];
+    }
 
+    /**
+     * @throws ORMException
+     * @throws ServiceNotFoundException
+     * @throws Twig_Error_Loader
+     * @throws \Doctrine\ORM\OptimisticLockException
+     * @throws \Oforge\Engine\Modules\Core\Exceptions\Template\TemplateNotFoundException
+     */
+    private function initTwig() {
         /** @var TemplateManagementService $templateManagementService */
         $templateManagementService = Oforge()->Services()->get("template.management");
-        $activeTemplate            = $templateManagementService->getActiveTemplate()->getName();
 
+        $activeTemplate            = $templateManagementService->getActiveTemplate()->getName();
         $templatePath              = Statics::TEMPLATE_DIR . DIRECTORY_SEPARATOR . $activeTemplate . DIRECTORY_SEPARATOR . 'MailTemplates';
 
         /** @var CustomTwig twig */
         $this->twig = new CustomTwig($templatePath, ['cache' => ROOT_PATH . DIRECTORY_SEPARATOR . Statics::CACHE_DIR . '/mailer']);
 
+        /**
+         * TODO: check if all extensions are still required for rendering
+         */
         $this->twig->addExtension(new \Oforge\Engine\Modules\CMS\Twig\AccessExtension());
         $this->twig->addExtension(new AccessExtension());
         $this->twig->addExtension(new MediaExtension());
         $this->twig->addExtension(new SlimExtension());
         $this->twig->addExtension(new TwigOforgeDebugExtension());
+    }
 
-        $time_elapsed_secs = microtime(true) - $start;
-        print($time_elapsed_secs);
+    private function
+
+    /**
+     * Structure:
+     * Call Oforge()->Services()->get('mail')
+     * $mailservice->send([...])
+     *
+     */
+
+    public function initPhpMailer() {
+
+    }
+
+    public function initConfig() {
 
     }
 
@@ -107,6 +149,12 @@ class MailService {
      * @throws Exception
      */
     public function send(array $options, array $templateData = []) {
+        if(!isset($this->mailer)) {
+          $this->mailer = initMailer();
+        }
+
+        // check if everything has been set up
+        // check how to implement this with init function (such that init is called if needed)
 
         $this->mailer->setFrom($address = $this->getSenderAddress($options['from']), $name = $this->config['mailer_from_name']);
 
@@ -172,7 +220,7 @@ class MailService {
      * 2. Remove unnecessary validation code ---- DONE
      *
      * 3. Use event system + batchSend() + SMTP keepAlive --> later
-     * 4. Move templates / logic to corresponding  --> later
+     * 4. Move templates / logic to corresponding plugin --> later
      * 5. Don't create a new mailer instance on each send ---- DONE
      */
 
@@ -222,6 +270,11 @@ class MailService {
         return $senderAddress;
     }
 
+
+
+
+     // TODO : The following functions prepare data for the mailer and should be declared in the corresponding plugins.
+
     /**
      * @param $userId
      * @param $conversationId
@@ -231,7 +284,6 @@ class MailService {
      * @throws ORMException
      * @throws ServiceNotFoundException
      */
-    //TODO: do this in corresponding plugin
     public function sendNewMessageInfoMail($userId, $conversationId) {
         /** @var  UserService $userService */
         $userService = Oforge()->Services()->get('frontend.user.management.user');
@@ -264,7 +316,6 @@ class MailService {
      * @throws ORMException
      * @throws ServiceNotFoundException
      */
-    //TODO: do this in corresponding plugin
     public function sendInsertionApprovedInfoMail($insertionId) {
         /** @var InsertionService $insertionService */
         $insertionService = Oforge()->Services()->get('insertion');
@@ -302,7 +353,6 @@ class MailService {
      * @throws ORMException
      * @throws ServiceNotFoundException
      */
-    //TODO: do this in corresponding plugin
     public function sendNewSearchResultsInfoMail($userId, $newResultsCount, $searchLink) {
         /** @var  UserService $userService */
         $userService = Oforge()->Services()->get('frontend.user.management.user');
@@ -333,9 +383,7 @@ class MailService {
      * @param Insertion $insertion
      *
      * @throws Exception
-     * @throws ServiceNotFoundException
      */
-    //TODO: do this in corresponding plugin
     public function sendInsertionCreateInfoMail(User $user, Insertion $insertion) {
         $userMail      = $user->getEmail();
         $mailerOptions = [
